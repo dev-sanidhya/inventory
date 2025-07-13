@@ -18,19 +18,22 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { useToast } from "@/hooks/use-toast"
 import { getStorageItem, setStorageItem } from "@/lib/storage-utils"
+import { supabase } from "@/lib/supabaseClient"
 
 // Define types for our data
 interface Room {
   id: string
   name: string
+  created_at?: string
 }
 
 interface Item {
   id: string
-  roomId: string
+  room_id: string
   name: string
   quantity: number
-  costPerUnit: number
+  cost_per_unit: number
+  created_at?: string
 }
 
 export default function Home() {
@@ -40,29 +43,44 @@ export default function Home() {
   const [items, setItems] = useState<Item[]>([])
   const { toast } = useToast()
 
-  // Load data from localStorage on initial render
+  // Load rooms and items from Supabase on initial render
   useEffect(() => {
-    const savedRooms = getStorageItem<Room[]>("rooms", [])
-    const savedItems = getStorageItem<Item[]>("items", [])
+    const fetchRoomsAndItems = async () => {
+      const { data: roomsData, error: roomsError } = await supabase
+        .from("rooms")
+        .select("*")
+        .order("created_at", { ascending: false })
+      if (roomsError) {
+        toast({
+          title: "Error",
+          description: roomsError.message,
+          variant: "destructive",
+        })
+        return
+      }
+      setRooms(roomsData || [])
 
-    setRooms(savedRooms)
-    setItems(savedItems)
+      const { data: itemsData, error: itemsError } = await supabase
+        .from("items")
+        .select("*")
+      if (itemsError) {
+        toast({
+          title: "Error",
+          description: itemsError.message,
+          variant: "destructive",
+        })
+        return
+      }
+      setItems(itemsData || [])
+    }
+    fetchRoomsAndItems()
   }, [])
-
-  // Save data to localStorage whenever it changes
-  useEffect(() => {
-    setStorageItem("rooms", rooms)
-  }, [rooms])
-
-  useEffect(() => {
-    setStorageItem("items", items)
-  }, [items])
 
   // Calculate total value for a room
   const calculateRoomTotal = (roomId: string) => {
     return items
-      .filter((item) => item.roomId === roomId)
-      .reduce((total, item) => total + item.quantity * item.costPerUnit, 0)
+      .filter((item) => item.room_id === roomId)
+      .reduce((total, item) => total + item.quantity * item.cost_per_unit, 0)
   }
 
   // Calculate grand total across all rooms
@@ -70,8 +88,8 @@ export default function Home() {
     return rooms.reduce((total, room) => total + calculateRoomTotal(room.id), 0)
   }
 
-  // Add a new room
-  const handleAddRoom = () => {
+  // Add a new room to Supabase
+  const handleAddRoom = async () => {
     if (!newRoomName.trim()) {
       toast({
         title: "Error",
@@ -80,16 +98,21 @@ export default function Home() {
       })
       return
     }
-
-    const newRoom: Room = {
-      id: Date.now().toString(),
-      name: newRoomName.trim(),
+    const { data, error } = await supabase
+      .from("rooms")
+      .insert([{ name: newRoomName.trim() }])
+      .select()
+    if (error) {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      })
+      return
     }
-
-    setRooms([...rooms, newRoom])
+    setRooms((prev) => (data ? [...data, ...prev] : prev))
     setNewRoomName("")
     setIsAddRoomOpen(false)
-
     toast({
       title: "Room added",
       description: `${newRoomName} has been added successfully`,
@@ -150,7 +173,7 @@ export default function Home() {
               <Card className="h-full transition-all hover:shadow-md">
                 <CardHeader>
                   <CardTitle>{room.name}</CardTitle>
-                  <CardDescription>{items.filter((item) => item.roomId === room.id).length} items</CardDescription>
+                  <CardDescription>{items.filter((item) => item.room_id === room.id).length} items</CardDescription>
                 </CardHeader>
                 <CardContent>
                   <p className="text-2xl font-bold">${calculateRoomTotal(room.id).toFixed(2)}</p>
@@ -168,7 +191,7 @@ export default function Home() {
       )}
       {rooms.length > 0 && (
         <div className="mt-8 text-center text-sm text-muted-foreground">
-          <p>All shop data is stored locally on your device and will be available when you return.</p>
+          <p>All shop data is now stored in the cloud and shared across all users.</p>
         </div>
       )}
     </main>

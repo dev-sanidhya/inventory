@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { use } from "react"
 import { useRouter } from "next/navigation"
 import { ArrowLeft, Edit, Plus, Trash2 } from "lucide-react"
 import Link from "next/link"
@@ -30,6 +31,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 import { getStorageItem, setStorageItem } from "@/lib/storage-utils"
+import { supabase } from "@/lib/supabaseClient"
 
 // Define types for our data
 interface Room {
@@ -39,10 +41,11 @@ interface Room {
 
 interface Item {
   id: string
-  roomId: string
+  room_id: string
   name: string
   quantity: number
-  costPerUnit: number
+  cost_per_unit: number
+  created_at?: string
 }
 
 interface ItemFormData {
@@ -51,7 +54,13 @@ interface ItemFormData {
   costPerUnit: number
 }
 
-export default function RoomPage({ params }: { params: { id: string } }) {
+function isPromise<T>(value: any): value is Promise<T> {
+  return typeof value === 'object' && value !== null && typeof value.then === 'function';
+}
+
+export default function RoomPage({ params }: { params: { id: string } | Promise<{ id: string }> }) {
+  // Unwrap params if it's a promise (for future Next.js compatibility)
+  const actualParams = isPromise<{ id: string }>(params) ? use(params) : params;
   const router = useRouter()
   const { toast } = useToast()
   const [room, setRoom] = useState<Room | null>(null)
@@ -69,98 +78,150 @@ export default function RoomPage({ params }: { params: { id: string } }) {
     costPerUnit: 0,
   })
 
-  // Load data from localStorage on initial render
+  // Load room from localStorage and items from Supabase on initial render
   useEffect(() => {
-    const savedRooms = getStorageItem<Room[]>("rooms", [])
-    const savedItems = getStorageItem<Item[]>("items", [])
+    // Fetch room from Supabase
+    const fetchRoom = async () => {
+      const { data, error } = await supabase
+        .from("rooms")
+        .select("*")
+        .eq("id", actualParams.id)
+        .single();
 
-    if (savedRooms.length > 0) {
-      const currentRoom = savedRooms.find((r) => r.id === params.id)
-
-      if (currentRoom) {
-        setRoom(currentRoom)
-        setRoomName(currentRoom.name)
-      } else {
-        // Room not found, redirect to home
-        router.push("/")
+      if (error || !data) {
+        router.push("/");
+        return;
       }
-    } else {
-      // No rooms saved, redirect to home
-      router.push("/")
-    }
+      setRoom(data);
+      setRoomName(data.name);
+    };
 
-    setItems(savedItems.filter((item) => item.roomId === params.id))
-  }, [params.id, router])
+    fetchRoom();
+
+    // Fetch items from Supabase
+    const fetchItems = async () => {
+      const { data, error } = await supabase
+        .from("items")
+        .select("*")
+        .eq("room_id", actualParams.id)
+        .order("created_at", { ascending: false });
+      if (error) {
+        toast({
+          title: "Error",
+          description: error.message,
+          variant: "destructive",
+        });
+        return;
+      }
+      setItems(data || []);
+    };
+    fetchItems();
+  }, [actualParams.id, router, toast]);
 
   // Calculate total value for the room
   const calculateRoomTotal = () => {
-    return items.reduce((total, item) => total + item.quantity * item.costPerUnit, 0)
+    return items.reduce((total, item) => total + item.quantity * item.cost_per_unit, 0)
   }
 
-  // Add a new item
-  const handleAddItem = () => {
+  // Add or update an item in Supabase
+  const handleAddItem = async () => {
     if (!itemFormData.name.trim()) {
       toast({
         title: "Error",
         description: "Item name cannot be empty",
         variant: "destructive",
-      })
-      return
+      });
+      return;
     }
-
     if (itemFormData.quantity <= 0) {
       toast({
         title: "Error",
         description: "Quantity must be greater than zero",
         variant: "destructive",
-      })
-      return
+      });
+      return;
     }
-
-    const savedItems = getStorageItem<Item[]>("items", [])
-    let allItems: Item[] = savedItems
-
+    if (!room) {
+      toast({
+        title: "Error",
+        description: "Room not loaded",
+        variant: "destructive",
+      });
+      return;
+    }
     if (editingItem) {
       // Update existing item
-      allItems = allItems.map((item) =>
-        item.id === editingItem.id
-          ? {
-              ...item,
-              name: itemFormData.name.trim(),
-              quantity: itemFormData.quantity,
-              costPerUnit: itemFormData.costPerUnit,
-            }
-          : item,
+      const { data, error } = await supabase
+        .from("items")
+        .update({
+          name: itemFormData.name.trim(),
+          quantity: itemFormData.quantity,
+          cost_per_unit: itemFormData.costPerUnit,
+        })
+        .eq("id", editingItem.id)
+        .select()
+      if (error) {
+        toast({
+          title: "Error",
+          description: error.message,
+          variant: "destructive",
+        })
+        return
+      }
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === editingItem.id
+            ? { ...item, name: itemFormData.name.trim(), quantity: itemFormData.quantity, cost_per_unit: itemFormData.costPerUnit }
+            : item
+        )
       )
-
       toast({
         title: "Item updated",
         description: `${itemFormData.name} has been updated successfully`,
       })
     } else {
       // Add new item
-      const newItem: Item = {
-        id: Date.now().toString(),
-        roomId: params.id,
+      console.log("Adding item:", {
+        room_id: room.id,
         name: itemFormData.name.trim(),
         quantity: itemFormData.quantity,
-        costPerUnit: itemFormData.costPerUnit,
+        cost_per_unit: itemFormData.costPerUnit,
+      });
+      const { data, error } = await supabase
+        .from("items")
+        .insert([
+          {
+            room_id: room.id, // use room.id here!
+            name: itemFormData.name.trim(),
+            quantity: itemFormData.quantity,
+            cost_per_unit: itemFormData.costPerUnit,
+          },
+        ])
+        .select();
+      if (error) {
+        toast({
+          title: "Error",
+          description: error.message,
+          variant: "destructive",
+        });
+        return;
       }
-
-      allItems.push(newItem)
-
+      // Refetch items after insert
+      const { data: newItems } = await supabase
+        .from("items")
+        .select("*")
+        .eq("room_id", room.id)
+        .order("created_at", { ascending: false });
+      setItems(newItems || []);
       toast({
         title: "Item added",
         description: `${itemFormData.name} has been added successfully`,
-      })
+      });
     }
-
-    setStorageItem("items", allItems)
-    setItems(allItems.filter((item) => item.roomId === params.id))
-    setItemFormData({ name: "", quantity: 1, costPerUnit: 0 })
-    setIsAddItemOpen(false)
-    setEditingItem(null)
-  }
+    setItemFormData({ name: "", quantity: 1, costPerUnit: 0 });
+    setIsAddItemOpen(false);
+    setEditingItem(null);
+  };
 
   // Edit an item
   const handleEditItem = (item: Item) => {
@@ -168,35 +229,37 @@ export default function RoomPage({ params }: { params: { id: string } }) {
     setItemFormData({
       name: item.name,
       quantity: item.quantity,
-      costPerUnit: item.costPerUnit,
+      costPerUnit: item.cost_per_unit,
     })
     setIsAddItemOpen(true)
   }
 
-  // Delete an item
-  const handleDeleteItem = () => {
+  // Delete an item from Supabase
+  const handleDeleteItem = async () => {
     if (!itemToDelete) return
-
-    const savedItems = getStorageItem<Item[]>("items", [])
-    let allItems: Item[] = savedItems ? JSON.parse(savedItems) : []
-
-    const itemName = allItems.find((item) => item.id === itemToDelete)?.name || "Item"
-
-    allItems = allItems.filter((item) => item.id !== itemToDelete)
-    localStorage.setItem("items", JSON.stringify(allItems))
-    setItems(allItems.filter((item) => item.roomId === params.id))
-
+    const { error } = await supabase
+      .from("items")
+      .delete()
+      .eq("id", itemToDelete)
+    if (error) {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      })
+      return
+    }
+    setItems((prev) => prev.filter((item) => item.id !== itemToDelete))
     setIsDeleteItemOpen(false)
     setItemToDelete(null)
-
     toast({
       title: "Item deleted",
-      description: `${itemName} has been removed from your inventory`,
+      description: `Item has been removed from your inventory`,
     })
   }
 
   // Update room name
-  const handleUpdateRoom = () => {
+  const handleUpdateRoom = async () => {
     if (!roomName.trim()) {
       toast({
         title: "Error",
@@ -206,36 +269,63 @@ export default function RoomPage({ params }: { params: { id: string } }) {
       return
     }
 
-    const savedRooms = getStorageItem<Room[]>("rooms", [])
-    if (savedRooms.length > 0 && room) {
-      const updatedRooms = savedRooms.map((r) => (r.id === room.id ? { ...r, name: roomName.trim() } : r))
-      setStorageItem("rooms", updatedRooms)
-      setRoom({ ...room, name: roomName.trim() })
-      setIsEditRoomOpen(false)
+    const { error } = await supabase
+      .from("rooms")
+      .update({ name: roomName.trim() })
+      .eq("id", room?.id)
 
+    if (error) {
       toast({
-        title: "Room updated",
-        description: `Room name changed to ${roomName}`,
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
       })
+      return
     }
+
+    if (room) {
+      setRoom({ ...room, name: roomName.trim(), id: room.id })
+    }
+    setIsEditRoomOpen(false)
+
+    toast({
+      title: "Room updated",
+      description: `Room name changed to ${roomName}`,
+    })
   }
 
   // Delete room and all its items
-  const handleDeleteRoom = () => {
+  const handleDeleteRoom = async () => {
     if (!room) return
 
     // Delete room
-    const savedRooms = getStorageItem<Room[]>("rooms", [])
-    if (savedRooms.length > 0) {
-      const updatedRooms = savedRooms.filter((r) => r.id !== room.id)
-      setStorageItem("rooms", updatedRooms)
+    const { error: roomError } = await supabase
+      .from("rooms")
+      .delete()
+      .eq("id", room.id)
+
+    if (roomError) {
+      toast({
+        title: "Error",
+        description: roomError.message,
+        variant: "destructive",
+      })
+      return
     }
 
     // Delete all items in the room
-    const savedItems = getStorageItem<Item[]>("items", [])
-    if (savedItems.length > 0) {
-      const updatedItems = savedItems.filter((item) => item.roomId !== room.id)
-      setStorageItem("items", updatedItems)
+    const { error: itemsError } = await supabase
+      .from("items")
+      .delete()
+      .eq("room_id", room.id)
+
+    if (itemsError) {
+      toast({
+        title: "Error",
+        description: itemsError.message,
+        variant: "destructive",
+      })
+      return
     }
 
     toast({
@@ -378,8 +468,8 @@ export default function RoomPage({ params }: { params: { id: string } }) {
                   <TableRow key={item.id}>
                     <TableCell className="font-medium">{item.name}</TableCell>
                     <TableCell className="text-right">{item.quantity}</TableCell>
-                    <TableCell className="text-right">${item.costPerUnit.toFixed(2)}</TableCell>
-                    <TableCell className="text-right">${(item.quantity * item.costPerUnit).toFixed(2)}</TableCell>
+                    <TableCell className="text-right">${item.cost_per_unit.toFixed(2)}</TableCell>
+                    <TableCell className="text-right">${(item.quantity * item.cost_per_unit).toFixed(2)}</TableCell>
                     <TableCell className="text-right">
                       <div className="flex justify-end gap-2">
                         <Button variant="ghost" size="icon" onClick={() => handleEditItem(item)}>
@@ -476,7 +566,7 @@ export default function RoomPage({ params }: { params: { id: string } }) {
         </AlertDialogContent>
       </AlertDialog>
       <div className="mt-8 text-center text-sm text-muted-foreground">
-        <p>All shop data is stored locally on your device and will be available when you return.</p>
+        <p>All items are now stored in the cloud and shared across all users.</p>
       </div>
     </main>
   )
